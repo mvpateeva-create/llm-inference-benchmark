@@ -226,6 +226,7 @@ For a production-oriented benchmark I would additionally evaluate:
 
 ```bash
 pip install -r requirements.txt
+```
 3. Start the local llama.cpp server with the GGUF model on port 8000.
 
 4. Run the benchmarks:
