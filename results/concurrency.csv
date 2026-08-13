@@ -1,0 +1,4 @@
+concurrency,avg_latency,throughput
+1,1.112,0.90
+2,1.670,0.90
+4,3.052,0.85
