@@ -217,3 +217,30 @@ For a production-oriented benchmark I would additionally evaluate:
 - error rate and timeout rate;
 - sustained load over longer periods;
 - comparison of different serving configurations.
+
+## How to run
+
+1. Create and activate a Python virtual environment.
+
+2. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+3. Start the local llama.cpp server with the GGUF model on port 8000.
+
+4. Run the benchmarks:
+
+```bash
+python benchmark.py
+python token_benchmark.py
+python prompt_benchmark.py
+```
+
+5. Generate charts:
+
+```bash
+python charts.py
+```
+
+Raw benchmark results are stored in `results/`.
+Generated visualizations are stored in `charts/`.
