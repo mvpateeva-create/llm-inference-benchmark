@@ -1,115 +1,93 @@
 # LLM Inference Performance Benchmark
 
-## Objective
+A reproducible study of local LLM serving performance: what drives **time to first token (TTFT)**, end-to-end latency, generation speed, and request throughput—and where a single-node CPU setup reaches its limit.
 
-Evaluate the performance characteristics of local LLM inference
-and analyze how output length, prompt size, concurrency and CPU
-configuration affect latency and throughput.
+> **Portfolio case:** I designed the experiment matrix, implemented a streaming benchmark client, collected raw observations, visualized the results, and translated them into serving and capacity-planning implications.
 
-## Test environment
+## Results at a glance
 
-Model: Qwen2.5-0.5B-Instruct  
-Format: GGUF  
-Quantization: Q4_K_M  
-Runtime: llama.cpp / llama-cpp-python  
+| Experiment | Published result | Operational interpretation |
+|---|---|---|
+| Output length | Average latency rose from **0.243 s at 10 tokens** to **2.251 s at 100 tokens**; TTFT stayed near 0.03 s | Output limits are a direct latency and compute-cost control |
+| Prompt size | Average TTFT rose from **0.031 s (short)** to **0.271 s (very long)** | Large context increases prefill work before the user sees a token |
+| Concurrency | At 1→4 concurrent requests, average latency rose **1.112→3.052 s**, while throughput changed **0.90→0.85 req/s** | This CPU configuration was already compute-bound; more in-flight work created queueing, not capacity |
+| CPU threads | At 1→4 threads, generation speed rose **19.39→42.16 tok/s** and average latency fell **5.130→2.374 s** | Runtime configuration materially affects the same model on the same host |
 
-Hardware:
-- MacBook Pro
-- Quad-Core Intel Core i5, 2.3 GHz
-- 4 CPU cores
-- Hyper-Threading enabled
-- 8 GB RAM
+These are observations from one local test environment, not universal model-performance claims.
 
-Execution:
-- Local inference
-- HTTP API on 127.0.0.1:8000
+## Visual result gallery
 
-## Metrics
+| Output length affects decode latency | Prompt size affects TTFT |
+|---|---|
+| ![Output length versus total latency](charts/output_tokens_vs_latency.png) | ![Prompt size versus TTFT](charts/prompt_size_vs_ttft.png) |
 
-The following metrics were used:
+| Concurrency increases latency | Throughput does not improve |
+|---|---|
+| ![Concurrency versus latency](charts/concurrency_vs_latency.png) | ![Concurrency versus throughput](charts/concurrency_vs_throughput.png) |
 
-- TTFT (Time to First Token) — time between sending the request
-  and receiving the first generated token.
-- Total latency — time between sending the request and receiving
-  the complete response.
-- Generation speed — number of generated tokens per second.
-- Throughput — number of completed requests per second.
+## Production-oriented interpretation
 
-These metrics were selected because they describe different
-parts of the user experience and system performance.
+The benchmark separates two inference phases that require different controls:
 
-TTFT reflects how quickly the user starts seeing a response.
+- **Prefill:** prompt processing before the first generated token. Track with TTFT; manage through context limits, prompt design, caching, and model/runtime choice.
+- **Decode:** autoregressive output generation. Track with tokens/s and total latency; manage through output limits, quantization, hardware, batching, and serving configuration.
 
-Generation speed reflects how quickly the model continues
-generating after the response starts.
+The concurrency result is the clearest capacity signal in this dataset: latency degraded without a throughput gain. In a production service, that would justify an explicit concurrency limit or queue, followed by tests of batching, replicas, and accelerated hardware before increasing admitted load.
 
-Total latency reflects complete response time.
+### From averages to service-level metrics
 
-Throughput reflects the capacity of the system under load.
+Means explain trends, but production readiness depends on tail behavior. `analyze_results.py` derives **P50/P95/P99** from the raw observations already committed to this repository:
 
-## Methodology
+```bash
+python analyze_results.py
+```
 
-A local LLM server was started using llama.cpp.
+The generated table is stored in [`results/percentiles.csv`](results/percentiles.csv). It covers baseline, output-length, and prompt-size runs. The concurrency CSV contains only published aggregates, so concurrency percentiles are intentionally not inferred. A future load test should save one row per request before tail latency is compared across configurations.
 
-A Python client was created to send test prompts to the local API,
-measure performance metrics and save raw observations to CSV files.
+## Benchmark design
 
-Streaming responses were used to measure TTFT.
+### Test environment
 
-The llama.cpp tokenizer endpoint was used to calculate the real
-number of generated tokens instead of approximating tokens by words.
+| Layer | Configuration |
+|---|---|
+| Model | Qwen2.5-0.5B-Instruct |
+| Format / quantization | GGUF / Q4_K_M |
+| Runtime | llama.cpp via llama-cpp-python |
+| Host | Intel MacBook Pro, quad-core i5 2.3 GHz, 8 GB RAM, Hyper-Threading enabled |
+| Serving | Local HTTP API on `127.0.0.1:8000` |
 
-Each main benchmark was executed repeatedly to reduce the impact
-of a single measurement.
+### Metrics
 
-## Experiment 1 — Baseline
+- **TTFT:** request start to first streamed content token.
+- **Total latency:** request start to completed response.
+- **Generation speed:** generated tokens divided by time after the first token.
+- **Throughput:** completed requests per second under the tested load.
 
-30 sequential requests were executed with:
+Streaming was used for TTFT. Generated tokens were counted through the llama.cpp tokenizer endpoint rather than approximated from words. Raw observations are versioned in [`results/`](results/).
 
-max_tokens = 100
+### Experiment matrix
 
-For each request the benchmark measured:
+| Experiment | Changed variable | Held constant / sample |
+|---|---|---|
+| Baseline | None | 30 sequential requests, `max_tokens=100` |
+| Output length | `max_tokens`: 10, 50, 100 | Same prompt, 30 requests per setting |
+| Prompt size | Short, medium, long, very long | `max_tokens=50`, 20 requests per setting |
+| Concurrency | 1, 2, 4 requests | Same local inference server |
+| CPU threads | 1, 2, 4 | Same model and host |
 
-- TTFT
-- total latency
-- generation time
-- completion tokens
-- generation speed
+## Detailed findings
 
-Example stable result:
-
-Average TTFT: 0.028 s  
-Average latency: 2.344 s  
-Average generation speed: 43.01 tokens/s
-
-## Experiment 2 — Output length
-
-The output limit was changed while keeping the prompt constant.
-
-Results:
+### 1. Output length: decode dominates total latency
 
 | Max output tokens | Average TTFT | Average latency | Average speed |
-|---|---:|---:|---:|
-| 10 | 0.030 s | 0.243 s | 47.06 tokens/s |
-| 50 | 0.027 s | 1.168 s | 43.84 tokens/s |
-| 100 | 0.027 s | 2.251 s | 43.33 tokens/s |
+|---:|---:|---:|---:|
+| 10 | 0.030 s | 0.243 s | 47.06 tok/s |
+| 50 | 0.027 s | 1.168 s | 43.84 tok/s |
+| 100 | 0.027 s | 2.251 s | 43.33 tok/s |
 
-### Finding
+Latency increased approximately linearly while TTFT remained stable. Generation speed also stabilized for longer outputs.
 
-Total latency increased approximately linearly with output length.
-
-TTFT remained almost unchanged.
-
-Generation speed remained relatively stable for longer outputs.
-
-This indicates that output length is primarily a driver of
-decode time and therefore total response latency.
-
-## Experiment 3 — Prompt size
-
-Prompt size was increased while max_tokens remained fixed.
-
-Results:
+### 2. Prompt size: prefill drives TTFT
 
 | Prompt size | Average TTFT | Average latency |
 |---|---:|---:|
@@ -118,130 +96,78 @@ Results:
 | Long | 0.181 s | 1.318 s |
 | Very long | 0.271 s | 1.508 s |
 
-### Finding
+Larger prompts increased time before generation began, demonstrating the distinction between input processing and output decoding.
 
-Larger prompts significantly increased TTFT.
-
-This is consistent with the model having to process more input
-tokens before generation begins.
-
-The experiment shows the difference between input processing
-(prefill) and output generation (decode).
-
-## Experiment 4 — Concurrency
-
-The number of concurrent requests was increased.
-
-Results:
+### 3. Concurrency: queueing without additional capacity
 
 | Concurrent requests | Average latency | Throughput |
-|---|---:|---:|
+|---:|---:|---:|
 | 1 | 1.112 s | 0.90 req/s |
 | 2 | 1.670 s | 0.90 req/s |
 | 4 | 3.052 s | 0.85 req/s |
 
-### Finding
+The server reached a compute-capacity bottleneck: additional concurrent requests increased waiting time instead of completed work per second.
 
-Higher concurrency increased latency without improving throughput
-in the tested local configuration.
-
-This indicates that the system reached a compute-capacity
-bottleneck: additional concurrent requests mostly increased
-waiting time instead of increasing completed requests per second.
-
-## Experiment 5 — CPU threads
-
-The same benchmark was repeated with different CPU thread settings.
-
-Observed results:
+### 4. CPU threads: configuration matters
 
 | CPU threads | Average TTFT | Average latency | Generation speed |
-|---|---:|---:|---:|
-| 1 | 0.075 s | 5.130 s | 19.39 tokens/s |
-| 2 | 0.052 s | 3.037 s | 32.83 tokens/s |
-| 4 | 0.045 s | 2.374 s | 42.16 tokens/s |
+|---:|---:|---:|---:|
+| 1 | 0.075 s | 5.130 s | 19.39 tok/s |
+| 2 | 0.052 s | 3.037 s | 32.83 tok/s |
+| 4 | 0.045 s | 2.374 s | 42.16 tok/s |
 
-### Finding
-
-Increasing CPU threads improved generation speed and reduced
-end-to-end latency.
-
-The largest gain was observed when moving from one to two threads.
-
-Performance continued improving at four threads, which matches
-the four CPU cores reported by the test machine.
-
-## Key findings
-
-1. Output length is a major driver of total latency.
-
-2. Prompt length primarily affects TTFT because the model must
-   process the input before generation starts.
-
-3. Generation throughput stabilizes around 43 tokens/s for longer
-   outputs on the tested configuration.
-
-4. Higher concurrency increases latency without improving request
-   throughput once the available compute capacity is saturated.
-
-5. CPU configuration has a significant impact on inference speed.
-
-6. A single latency number is not sufficient to describe LLM
-   performance. TTFT, generation speed, total latency and throughput
-   describe different parts of system behavior.
+The largest gain appeared from one to two threads, with further improvement at four threads—the number of physical CPU cores reported by the host.
 
 ## Limitations
 
-This benchmark was executed on a local Intel-based MacBook Pro
-using a small quantized model.
+- Results describe a small quantized model on one Intel CPU host and do not estimate production capacity.
+- Prompt groups use character-based categories rather than fixed input-token buckets.
+- Runs do not separate warm-up/cold-start observations; the percentile table exposes their effect but does not relabel them.
+- The concurrency dataset stores aggregate values only, so its variance and tail latency cannot be recovered.
+- No production batching, autoscaling, request queue, timeout/error-rate tracking, memory telemetry, or sustained-load soak test was used.
+- The experiments isolate performance behavior; they do not compare model quality.
 
-The results should therefore be interpreted as an analysis of
-performance behavior rather than an estimate of production capacity.
+## Next measurement plan
 
-The prompt-size experiment used qualitative prompt categories
-rather than fixed token counts.
+The next iteration should turn the same experiment structure into a configuration comparison rather than merely add more charts:
 
-The concurrency experiment was executed on a single local
-inference server without production batching or autoscaling.
+1. Define fixed input/output token buckets and a warm-up policy.
+2. Save one row per request with a configuration ID, timestamps, status, TTFT, latency, and token counts.
+3. Compare P50/P95/P99 latency, throughput, and error rate at each concurrency level.
+4. Add memory/CPU/GPU utilization and a sustained-load run.
+5. Apply explicit acceptance thresholds (for example, a TTFT SLO and maximum error rate) before selecting a serving configuration.
 
-## Possible next steps
+Candidate comparisons include CPU versus GPU, quantization levels, batch settings, and multiple replicas. They are a measurement roadmap, not results claimed by this repository.
 
-For a production-oriented benchmark I would additionally evaluate:
-
-- larger models and different quantization levels;
-- GPU-based inference;
-- fixed input-token buckets;
-- P50 / P95 / P99 latency under load;
-- batching behavior;
-- memory usage;
-- error rate and timeout rate;
-- sustained load over longer periods;
-- comparison of different serving configurations.
-
-## How to run
-
-1. Create and activate a Python virtual environment.
-
-2. Install dependencies:
+## Run locally
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
-3. Start the local llama.cpp server with the GGUF model on port 8000.
 
-4. Run the benchmarks:
+Start a llama.cpp-compatible server with the model on port `8000`, then run:
 
 ```bash
 python benchmark.py
 python token_benchmark.py
 python prompt_benchmark.py
-```
-
-5. Generate charts:
-
-```bash
 python charts.py
+python analyze_results.py
 ```
 
-Raw benchmark results are stored in `results/`.
-Generated visualizations are stored in `charts/`.
+Raw measurements live in [`results/`](results/); generated visualizations live in [`charts/`](charts/).
+
+## Repository structure
+
+```text
+.
+├── benchmark.py           # sequential baseline with streaming TTFT
+├── token_benchmark.py     # output-length experiment
+├── prompt_benchmark.py    # prompt-size experiment
+├── analyze_results.py     # P50/P95/P99 from committed raw observations
+├── charts.py              # result visualizations
+├── results/               # raw and derived CSV results
+└── charts/                # published plots
+```
